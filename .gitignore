@@ -3,8 +3,10 @@
 # env files
 chatbots/.env
 chatbots/RAG_model/.env
+patterns/workflows/1-introduction/.env
 
-# other files
-rough.ipynb
+# other files & directories
+rough.*
 NLP/.ipynb_checkpoints
 chatbots/RAG_model/venv
+Artificial-Intelligence
