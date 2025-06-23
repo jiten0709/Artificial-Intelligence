@@ -10,3 +10,7 @@ rough.*
 NLP/.ipynb_checkpoints
 chatbots/RAG_model/venv
 Artificial-Intelligence
+
+
+#Ignore vscode AI rules
+.github

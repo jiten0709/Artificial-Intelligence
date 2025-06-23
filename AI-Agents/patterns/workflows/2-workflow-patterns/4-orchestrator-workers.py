@@ -2,7 +2,7 @@ import os
 import time
 import asyncio
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor
 
 import openai
