@@ -1,15 +1,15 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
+
+import openai
 import time
 import asyncio
 import logging
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor
-
-import openai
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 
-load_dotenv()
 
 # Set up logging configuration
 logging.basicConfig(
