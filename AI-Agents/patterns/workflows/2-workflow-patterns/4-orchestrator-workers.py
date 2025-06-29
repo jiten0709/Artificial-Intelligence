@@ -6,6 +6,7 @@ import openai
 import time
 import asyncio
 import logging
+import random
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel, Field
@@ -21,9 +22,37 @@ logger = logging.getLogger(__name__)
 
 # Constants
 client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-model = "gpt-4o"
-MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
+model = os.getenv("OPENAI_MODEL", "gpt-4o-mini") 
+MAX_RETRIES = 5  
+INITIAL_RETRY_DELAY = 2
+MAX_RETRY_DELAY = 60  
+
+# Add a rate limiter to prevent too many requests
+class RateLimiter:
+    def __init__(self, requests_per_minute=20):
+        self.requests_per_minute = requests_per_minute
+        self.request_times = []
+        self.lock = asyncio.Lock()
+    
+    async def wait_if_needed(self):
+        """Wait if we've made too many requests recently"""
+        async with self.lock:
+            now = time.time()
+            # Remove requests older than 1 minute
+            self.request_times = [t for t in self.request_times if now - t < 60]
+            
+            if len(self.request_times) >= self.requests_per_minute:
+                # Wait until we can make another request
+                oldest_request = min(self.request_times)
+                wait_time = 60 - (now - oldest_request) + 0.1  # Add a small buffer
+                logger.info(f"Rate limiting: waiting {wait_time:.2f} seconds")
+                await asyncio.sleep(wait_time)
+            
+            # Record this request
+            self.request_times.append(time.time())
+
+# Create a global rate limiter
+rate_limiter = RateLimiter(requests_per_minute=15)  # Conservative limit
 
 # --------------------------------------------------------------
 # Step 1: Define the data models
@@ -132,76 +161,53 @@ The final version should incorporate your suggested improvements into a polished
 
 
 # --------------------------------------------------------------
-# Step 3: Helper functions with error handling
+# Step 3: Helper functions with improved error handling
 # --------------------------------------------------------------
 
-def make_api_call_with_retries(func, *args, **kwargs):
+async def make_api_call_with_retries(func, *args, **kwargs):
     """Make API call with retries for handling rate limits and network errors."""
     for attempt in range(MAX_RETRIES):
         try:
-            return func(*args, **kwargs)
-        except openai.RateLimitError:
-            wait_time = (2 ** attempt) * RETRY_DELAY
-            logger.warning(f"Rate limit hit. Retrying in {wait_time} seconds...")
-            time.sleep(wait_time)
+            # Wait if needed to avoid rate limits
+            await rate_limiter.wait_if_needed()
+            
+            # Run the API call in a thread pool to avoid blocking
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor() as executor:
+                return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+                
+        except openai.RateLimitError as e:
+            # Check if it's a quota error or regular rate limit
+            error_msg = str(e)
+            if "insufficient_quota" in error_msg:
+                logger.error("OpenAI API quota exceeded - you need to check your billing details")
+                print("\n========== QUOTA EXCEEDED ==========")
+                print("You've exceeded your OpenAI API quota. To fix this:")
+                print("1. Visit https://platform.openai.com/account/billing")
+                print("2. Check your usage or add payment information")
+                print("3. Consider upgrading your plan or adding funds")
+                print("=====================================\n")
+                raise Exception("OpenAI API quota exceeded - please check your billing details") from e
+            
+            # Exponential backoff with jitter for rate limits
+            wait_time = min(MAX_RETRY_DELAY, INITIAL_RETRY_DELAY * (2 ** attempt) + random.uniform(0, 1))
+            logger.warning(f"Rate limit hit. Retrying in {wait_time:.2f}s ({attempt+1}/{MAX_RETRIES})")
+            await asyncio.sleep(wait_time)
+            
         except openai.APIError as e:
             logger.error(f"API error: {str(e)}")
             if attempt < MAX_RETRIES - 1:
-                wait_time = (2 ** attempt) * RETRY_DELAY
-                logger.info(f"Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
+                wait_time = min(MAX_RETRY_DELAY, INITIAL_RETRY_DELAY * (2 ** attempt))
+                logger.info(f"Retrying in {wait_time:.2f}s ({attempt+1}/{MAX_RETRIES})")
+                await asyncio.sleep(wait_time)
             else:
                 raise
+                
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             raise
     
-    raise Exception(f"Failed after {MAX_RETRIES} retries")
-
-
-async def write_section_async(orchestrator, topic: str, section: SubTask, previous_sections: str) -> SectionContent:
-    """Asynchronous wrapper for section writing to allow parallel processing."""
-    def _write_section():
-        try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": WORKER_PROMPT.format(
-                            topic=topic,
-                            section_type=section.section_type,
-                            description=section.description,
-                            style_guide=section.style_guide,
-                            target_length=section.target_length,
-                            previous_sections=previous_sections
-                        )
-                    }
-                ],
-                response_format={"type": "json_object"},
-                tools=[
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": "write_blog_section",
-                            "description": "Write a blog section based on the provided details",
-                            "parameters": SectionContent.model_json_schema()
-                        }
-                    }
-                ],
-                tool_choice={"type": "function", "function": {"name": "write_blog_section"}},
-            )
-            
-            tool_call = completion.choices[0].message.tool_calls[0]
-            return SectionContent.model_validate_json(tool_call.function.arguments)
-        except Exception as e:
-            logger.error(f"Error writing section {section.section_type}: {str(e)}")
-            raise
-    
-    # Run in a thread pool to avoid blocking the event loop
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as executor:
-        return await loop.run_in_executor(executor, _write_section)
+    raise Exception(f"Failed after {MAX_RETRIES} retries. Please try again later when API limits reset.")
 
 
 # --------------------------------------------------------------
@@ -212,10 +218,10 @@ class BlogOrchestrator:
     def __init__(self):
         self.sections_content = {}
 
-    def get_plan(self, topic: str, target_length: int, style: str) -> OrchestratorPlan:
+    async def get_plan_async(self, topic: str, target_length: int, style: str) -> OrchestratorPlan:
         """Get orchestrator's structure plan for the blog with error handling."""
         try:
-            return make_api_call_with_retries(
+            completion = await make_api_call_with_retries(
                 lambda: client.chat.completions.create(
                     model=model,
                     messages=[
@@ -223,7 +229,7 @@ class BlogOrchestrator:
                             "role": "system",
                             "content": ORCHESTRATOR_PROMPT.format(
                                 topic=topic, target_length=target_length, style=style
-                            )
+                            ) + "\n\nPlease provide your response in JSON format."
                         }
                     ],
                     response_format={"type": "json_object"},
@@ -240,26 +246,21 @@ class BlogOrchestrator:
                     tool_choice={"type": "function", "function": {"name": "create_blog_plan"}},
                 )
             )
+            
+            tool_call = completion.choices[0].message.tool_calls[0]
+            return OrchestratorPlan.model_validate_json(tool_call.function.arguments)
         except Exception as e:
             logger.error(f"Error creating blog plan: {str(e)}")
             raise
+    
+    def get_plan(self, topic: str, target_length: int, style: str) -> OrchestratorPlan:
+        """Synchronous wrapper for get_plan_async"""
+        return asyncio.run(self.get_plan_async(topic, target_length, style))
 
-    def write_section(self, topic: str, section: SubTask) -> SectionContent:
-        """Write a specific blog section (synchronous version)."""
-        # Create context from previously written sections
-        previous_sections = ""
-        if self.sections_content:
-            previous_sections = "\n\n".join(
-                [
-                    f"=== {section_type} ===\n{content.content}"
-                    for section_type, content in self.sections_content.items()
-                ]
-            )
-        else:
-            previous_sections = "This is the first section."
-
+    async def write_section_async(self, topic: str, section: SubTask, previous_sections: str) -> SectionContent:
+        """Asynchronous wrapper for section writing to allow parallel processing."""
         try:
-            return make_api_call_with_retries(
+            completion = await make_api_call_with_retries(
                 lambda: client.chat.completions.create(
                     model=model,
                     messages=[
@@ -272,7 +273,7 @@ class BlogOrchestrator:
                                 style_guide=section.style_guide,
                                 target_length=section.target_length,
                                 previous_sections=previous_sections
-                            )
+                            ) + "\n\nPlease provide your response in JSON format."
                         }
                     ],
                     response_format={"type": "json_object"},
@@ -288,12 +289,58 @@ class BlogOrchestrator:
                     ],
                     tool_choice={"type": "function", "function": {"name": "write_blog_section"}},
                 )
-            ).choices[0].message.tool_calls[0].function.arguments
+            )
+            
+            tool_call = completion.choices[0].message.tool_calls[0]
+            return SectionContent.model_validate_json(tool_call.function.arguments)
         except Exception as e:
             logger.error(f"Error writing section {section.section_type}: {str(e)}")
             raise
 
-    def review_blog(self, topic: str, plan: OrchestratorPlan) -> ReviewFeedback:
+    async def write_sections_sequentially(self, topic: str, plan: OrchestratorPlan) -> Dict[str, SectionContent]:
+        """Write all sections sequentially to avoid rate limits."""
+        sections_dict = {}
+        previous_sections = "This is the first section."
+        
+        for section in plan.sections:
+            logger.info(f"Writing section: {section.section_type}")
+            content = await self.write_section_async(topic, section, previous_sections)
+            sections_dict[section.section_type] = content
+            
+            # Update previous sections for context
+            previous_sections = "\n\n".join(
+                [
+                    f"=== {section_type} ===\n{content.content}"
+                    for section_type, content in sections_dict.items()
+                ]
+            )
+            
+            # Add a small delay between sections to help with rate limiting
+            await asyncio.sleep(1)
+        
+        return sections_dict
+
+    async def write_sections_in_parallel(self, topic: str, plan: OrchestratorPlan) -> Dict[str, SectionContent]:
+        """Write all sections in parallel using async."""
+        # First collect the context for all sections
+        previous_sections = "This is the first section."
+        
+        # Create tasks for each section
+        tasks = []
+        for section in plan.sections:
+            tasks.append(self.write_section_async(topic, section, previous_sections))
+        
+        # Execute all section writing tasks in parallel
+        section_contents = await asyncio.gather(*tasks)
+        
+        # Store the results
+        sections_dict = {}
+        for i, section in enumerate(plan.sections):
+            sections_dict[section.section_type] = section_contents[i]
+        
+        return sections_dict
+
+    async def review_blog_async(self, topic: str, plan: OrchestratorPlan) -> ReviewFeedback:
         """Review the entire blog for cohesion and flow."""
         sections_text = "\n\n".join(
             [
@@ -303,7 +350,7 @@ class BlogOrchestrator:
         )
 
         try:
-            completion = make_api_call_with_retries(
+            completion = await make_api_call_with_retries(
                 lambda: client.chat.completions.create(
                     model=model,
                     messages=[
@@ -313,7 +360,7 @@ class BlogOrchestrator:
                                 topic=topic,
                                 audience=plan.target_audience,
                                 sections=sections_text,
-                            )
+                            ) + "\n\nPlease provide your response in JSON format."
                         }
                     ],
                     response_format={"type": "json_object"},
@@ -336,46 +383,30 @@ class BlogOrchestrator:
         except Exception as e:
             logger.error(f"Error reviewing blog: {str(e)}")
             raise
+    
+    def review_blog(self, topic: str, plan: OrchestratorPlan) -> ReviewFeedback:
+        """Synchronous wrapper for review_blog_async"""
+        return asyncio.run(self.review_blog_async(topic, plan))
 
-    async def write_sections_in_parallel(self, topic: str, plan: OrchestratorPlan) -> Dict[str, SectionContent]:
-        """Write all sections in parallel using async."""
-        # First collect the context for all sections
-        previous_sections = "This is the first section."
-        
-        # Create tasks for each section
-        tasks = []
-        for section in plan.sections:
-            tasks.append(write_section_async(self, topic, section, previous_sections))
-        
-        # Execute all section writing tasks in parallel
-        section_contents = await asyncio.gather(*tasks)
-        
-        # Store the results
-        sections_dict = {}
-        for i, section in enumerate(plan.sections):
-            sections_dict[section.section_type] = section_contents[i]
-        
-        return sections_dict
-
-    def write_blog(self, topic: str, target_length: int = 1000, style: str = "informative") -> Dict:
-        """Main method to orchestrate the blog writing process."""
+    async def write_blog_async(self, topic: str, target_length: int = 1000, style: str = "informative") -> Dict:
+        """Async version of the main method to orchestrate the blog writing process."""
         start_time = time.time()
         logger.info(f"Starting blog writing process for topic: {topic}")
         
         try:
-            # Step 1: Get the orchestrator's plan (synchronous)
+            # Step 1: Get the orchestrator's plan
             logger.info("Creating blog structure plan...")
-            plan = self.get_plan(topic, target_length, style)
+            plan = await self.get_plan_async(topic, target_length, style)
             logger.info(f"Blog structure planned: {len(plan.sections)} sections")
             
-            # Step 2: Write all sections in parallel (async)
-            logger.info("Writing sections in parallel...")
-            self.sections_content = asyncio.run(self.write_sections_in_parallel(topic, plan))
+            # Step 2: Write all sections sequentially to avoid rate limits
+            logger.info("Writing sections sequentially...")
+            self.sections_content = await self.write_sections_sequentially(topic, plan)
             logger.info(f"All {len(self.sections_content)} sections written successfully")
             
-            # Step 3: Review the blog (synchronous)
+            # Step 3: Review the blog
             logger.info("Reviewing and polishing the blog...")
-            review = self.review_blog(topic, plan)
+            review = await self.review_blog_async(topic, plan)
             
             end_time = time.time()
             logger.info(f"Blog writing completed in {end_time - start_time:.2f} seconds")
@@ -388,6 +419,10 @@ class BlogOrchestrator:
         except Exception as e:
             logger.error(f"Error in blog writing process: {str(e)}")
             raise
+    
+    def write_blog(self, topic: str, target_length: int = 1000, style: str = "informative") -> Dict:
+        """Main method to orchestrate the blog writing process."""
+        return asyncio.run(self.write_blog_async(topic, target_length, style))
     
 
 # --------------------------------------------------------------
@@ -402,356 +437,40 @@ if __name__ == "__main__":
         target_length = 1500
         style = "informative"
 
-        blog_result = orchestrator.write_blog(topic, target_length, style)
+        # Create a mock mode option for when API is unavailable
+        use_mock_mode = os.getenv("USE_MOCK_MODE", "false").lower() in ("true", "1", "yes")
+        
+        if use_mock_mode:
+            print("Running in MOCK MODE - no API calls will be made")
+            # Here you could implement mock responses for testing
+            print("\n=== MOCK BLOG POST ===\n")
+            print("This is a mock blog post for testing without API calls.")
+        else:
+            blog_result = orchestrator.write_blog(topic, target_length, style)
 
-        print("\n\n=== FINAL BLOG POST ===\n")
-        print(blog_result['review'].final_version)
+            print("\n\n=== FINAL BLOG POST ===\n")
+            print(blog_result['review'].final_version)
 
-        print(f"\nCOHESION SCORE: {blog_result['review'].cohesion_score}")
-        if blog_result['review'].suggested_edits:
-            print("\n=== SUGGESTED EDITS ===")
-            for edit in blog_result['review'].suggested_edits:
-                print(f"Section: {edit.section_name}")
-                print(f"Suggested Edit: {edit.suggested_edit}")
-                print()
+            print(f"\nCOHESION SCORE: {blog_result['review'].cohesion_score}")
+            if blog_result['review'].suggested_edits:
+                print("\n=== SUGGESTED EDITS ===")
+                for edit in blog_result['review'].suggested_edits:
+                    print(f"Section: {edit.section_name}")
+                    print(f"Suggested Edit: {edit.suggested_edit}")
+                    print()
 
-        # Save the final blog post to a file
-        with open("final_blog_post.txt", "w") as f:
-            f.write(blog_result['review'].final_version)
+            # Save the final blog post to a file
+            with open("AI-Agents/patterns/workflows/2-workflow-patterns/final_blog_post.txt", "w") as f:
+                f.write(blog_result['review'].final_version)
 
-        logger.info("Final blog post saved to 'final_blog_post.txt'")
+            logger.info("Final blog post saved to 'final_blog_post.txt'")
     
     except Exception as e:
         logger.error(f"Error in blog generation process: {str(e)}")
         print(f"An error occurred: {str(e)}")
-
-# ----------------------------------------------------
-# old code for reference
-# ----------------------------------------------------
-
-# import os
-# from dotenv import load_dotenv
-# load_dotenv()
-
-# import openai
-# from pydantic import BaseModel, Field
-# import logging
-# from typing import List, Dict
-
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s - %(levelname)s - %(message)s",
-#     datefmt="%Y-%m-%d %H:%M:%S",
-# )
-# logger = logging.getLogger(__name__)
-
-# client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# model = "gpt-4o"
-
-# # --------------------------------------------------------------
-# # Step 1: Define the data models
-# # --------------------------------------------------------------
-
-# class SubTask(BaseModel):
-#     """blog section task defined by the orchestrator."""
-
-#     section_type: str = Field(description="type of blog section to write ")
-#     description: str = Field(description="what this section should cover")
-#     style_guide: str = Field(description="writing style for this section")
-#     target_length: int = Field(description="target length in words for this section")
-
-# class OrchestratorPlan(BaseModel):
-#     """Orchestrator's blog structure and tasks"""
-
-#     topic_analysis: str = Field(description="analysis of the blog topic")
-#     target_audience: str = Field(description="intended audience for the blog")
-#     sections: List[SubTask] = Field(description="list of sections to be written")
-
-# class SectionContent(BaseModel):
-#     """Content generated by a worker for a specific section."""
-
-#     content: str = Field(description="written content for the section")
-#     key_points: List[str] = Field(description="key points covered in the section")
-
-# class SuggestedEdits(BaseModel):
-#     """Suggested edits for a section"""
-
-#     section_name: str = Field(description="name of the section to edit")
-#     suggested_edit: str = Field(description="suggested edits for the section content")
-
-# class ReviewFeedback(BaseModel):
-#     """final review and suggestions for the blog"""
-
-#     cohesion_score: float = Field(description="how well the sections fit together (0-1)")
-#     suggested_edits: List[SuggestedEdits] = Field(description="list of suggested edits by section")
-#     final_version: str = Field(description="complete, polished blog post")
-
-# # --------------------------------------------------------------
-# # Step 2: Define the prompts
-# # --------------------------------------------------------------
-
-# ORCHESTRATOR_PROMPT = """
-# Analyze this blog topic and break it down into logical sections.
-
-# Topic: {topic}
-# Target Length: {target_length} words
-# Style: {style}
-
-# Return your response in this format:
-
-# # Analysis
-# Analyze the topic and explain how it should be structured.
-# Consider the narrative flow and how sections will work together.
-
-# # Target Audience
-# Define the target audience and their interests/needs.
-
-# # Sections
-# ## Section 1
-# - Type: section_type
-# - Description: what this section should cover
-# - Style: writing style guidelines
-
-# [Additional sections as needed...]
-# """
-
-# WORKER_PROMPT = """
-# Write a blog section based on:
-# Topic: {topic}
-# Section Type: {section_type}
-# Section Goal: {description}
-# Style Guide: {style_guide}
-
-# Return your response in this format:
-
-# # Content
-# [Your section content here, following the style guide]
-
-# # Key Points
-# - Main point 1
-# - Main point 2
-# [Additional points as needed...]
-# """
-
-# REVIEWER_PROMPT = """
-# Review this blog post for cohesion and flow:
-
-# Topic: {topic}
-# Target Audience: {audience}
-
-# Sections:
-# {sections}
-
-# Provide a cohesion score between 0.0 and 1.0, suggested edits for each section if needed, and a final polished version of the complete post.
-
-# The cohesion score should reflect how well the sections flow together, with 1.0 being perfect cohesion.
-# For suggested edits, focus on improving transitions and maintaining consistent tone across sections.
-# The final version should incorporate your suggested improvements into a polished, cohesive blog post.
-# """
-
-# # --------------------------------------------------------------
-# # Step 3: Implement orchestrator
-# # --------------------------------------------------------------
-
-# class BlogOrchestrator:
-#     def __init__(self):
-#         self.sections_content = {}
-
-#     def get_plan(self, topic: str, target_lenght: int, style: str) -> OrchestratorPlan:
-#         """get orchestrator's structure plan for the blog"""
-
-#         completion = client.chat.completions.create(
-#             model=model,
-#             messages=[
-#                 {
-#                     "role": "system",
-#                     "content": ORCHESTRATOR_PROMPT.format(
-#                         topic=topic, target_lenght=target_lenght, style=style
-#                     )
-#                 }
-#             ],
-#             response_format={"type": "json_object"},
-#             tools=[
-#                 {
-#                     "type": "function",
-#                     "function": {
-#                         "name": "create_blog_plan",
-#                         "description": "Create a structured plan for the blog",
-#                         "parameters": OrchestratorPlan.model_json_schema()
-#                     }
-#                 }
-#             ],
-#             tool_choice={"type": "function", "function": {"name": "create_blog_plan"}},
-#         )
-
-#         tool_call = completion.choices[0].message.tool_calls[0]
-
-#         return OrchestratorPlan.model_validate_json(tool_call.function.arguments)
-
-#     def write_section(self, topic: str, section: SubTask):
-#         """Worker: Write a specific blog section with context from previous sections.
-
-#         Args:
-#             topic: The main blog topic
-#             section: SubTask containing section details
-
-#         Returns:
-#             SectionContent: The written content and key points
-#         """
-
-#         # create context from previously written sections
-#         previous_sections = "\n\n".join(
-#             [
-#                 f"\n\n=== {section_type} ===\n{content.content}"
-#                 for section_type, content in self.sections_content.items()
-#             ]
-#         )
-
-#         completion = client.chat.completions.create(
-#             model=model,
-#             messages=[
-#                 {
-#                     "role": "system",
-#                     "content": WORKER_PROMPT.format(
-#                         topic=topic,
-#                         section_type=section.section_type,
-#                         description=section.description,
-#                         style_guide=section.style_guide,
-#                         target_length=section.target_length,
-#                         previous_sections=previous_sections if previous_sections else "this is the first section"
-#                     ),
-#                 }
-#             ],
-#             response_format={"type": "json_object"},
-#             tools=[
-#                 {
-#                     "type": "function",
-#                     "function": {
-#                         "name": "write_blog_section",
-#                         "description": "Write a blog section based on the provided details",
-#                         "parameters": SectionContent.model_json_schema()
-#                     }
-#                 }
-#             ],
-#             tool_choice={"type": "function", "function": {"name": "write_blog_section"}},
-#         )
-
-#         tool_call = completion.choices[0].message.tool_calls[0]
-
-#         return SectionContent.model_validate_json(tool_call.function.arguments)
-
-#     def review_blog(self, topic: str, plan: OrchestratorPlan) -> ReviewFeedback:
-#         """Worker: Review the entire blog for cohesion and flow.
-
-#         Returns:
-#             ReviewFeedback: The review feedback including cohesion score, suggested edits, and final version
-#         """
-
-#         sections_text = "\n\n".join(
-#             [
-#                 f"\n\n=== {section_type} ===\n{content.content}"
-#                 for section_type, content in self.sections_content.items()
-#             ]
-#         )
-
-#         completion = client.chat.completions.create(
-#             model=model,
-#             messages=[
-#                 {
-#                     "role": "system",
-#                     "content": REVIEWER_PROMPT.format(
-#                         topic=topic,
-#                         audience=plan.target_audience,
-#                         sections=sections_text,
-#                     )
-#                 }
-#             ],
-#             response_format={"type": "json_object"},
-#             tools=[
-#                 {
-#                     "type": "function",
-#                     "function": {
-#                         "name": "provide_review_feedback",
-#                         "description": "provide feedback and review for the blog post",
-#                         "parameters": ReviewFeedback.model_json_schema()
-#                     }
-#                 }
-#             ],
-#             tool_choice={"type": "function", "function": {"name": "provide_review_feedback"}},
-#        )
         
-#         tool_call = completion.choices[0].message.tool_calls[0]
-
-#         return ReviewFeedback.model_validate_json(tool_call.function.arguments)
-
-#     def write_blog(self, topic: str, target_length: int = 1000, style: str = "informative") -> Dict:
-#         """Main method to orchestrate the blog writing process.
-
-#         Args:
-#             topic: The main topic of the blog
-#             target_length: Target length of the blog in words
-#             style: Writing style for the blog
-
-
-#         Returns:
-#             Dict: Final blog post and review feedback
-#         """
-
-#         logger.info("Starting blog writing process for topic: %s", topic)
-
-#         # Step 1: Get the orchestrator's plan
-
-#         plan = self.get_plan(topic, target_length, style)
-#         logger.info(f"Orchestrator plan created: {len(plan.sections)} sections")
-#         logger.info(f"blog structure plan: {plan.model_dump_json(indent=2)}")
-
-#         # Step 2: Write each section using workers
-
-#         for section in plan.sections:
-#             logger.info(f"Writing section: {section.section_type}")
-#             content = self.write_section(topic, section)
-#             self.sections_content[section.section_type] = content
-
-#         # Step 3: Review the entire blog and polish it
-
-#         logger.info("Reviewing the entire blog for cohesion and flow")
-#         review_feedback = self.review_blog(topic, plan)
-
-#         return {
-#             "structure": plan,
-#             "sections": self.sections_content,
-#             "review": review_feedback
-#         }
-    
-# # --------------------------------------------------------------
-# # Step 4: Example usage
-# # --------------------------------------------------------------
-
-# if __name__ == "__main__":
-#     orchestrator = BlogOrchestrator()
-
-#     topic = "The Future of AI in Healthcare"
-#     target_length = 1500
-#     style = "informative"
-
-#     blog_result = orchestrator.write_blog(topic, target_length, style)
-
-#     logger.info("Blog writing process completed successfully!")
-#     logger.info(f"Final blog structure: {blog_result['structure'].model_dump_json(indent=2)}")
-#     logger.info(f"Sections content: {blog_result['sections']}")
-#     logger.info(f"Review feedback: {blog_result['review'].model_dump_json(indent=2)}")
-
-#     print("\n\n=== FINAL BLOG POST ===\n")
-#     print(blog_result['review'].final_version)
-
-#     print("\nCOHESION SCORE:", blog_result['review'].cohesion_score)    
-#     if blog_result['review'].suggested_edits:
-#         print("\nSUGGESTED EDITS:")
-#         for edit in blog_result['review'].suggested_edits:
-#             print(f"- {edit.section_name}: {edit.suggested_edit}")
-
-#     # Save the final blog post to a file
-#     with open("final_blog_post.txt", "w") as f:
-#         f.write(blog_result['review'].final_version)
-
-#     logger.info("Final blog post saved to 'final_blog_post.txt'")
+        # Special handling for quota errors
+        if "quota exceeded" in str(e).lower():
+            print("\nTo fix the quota issue, you can:")
+            print("1. Check your OpenAI billing at https://platform.openai.com/account/billing")
+            print("2. Set USE_MOCK_MODE=true in your .env file to test without API calls")
