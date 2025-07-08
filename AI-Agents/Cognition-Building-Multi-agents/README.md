@@ -18,7 +18,7 @@ The system simulates a complete research-to-report workflow, where specialized a
 
 ## ⚙️ The Workflow
 
-![4-Agent Pipeline](./assets/images/4-agent-pipeline.png)
+![4-Agent Pipeline](./assets/images/4-agent-pipeline.jpg)
 
 The system orchestrates a four-step workflow, managed by a central coordinator:
 
