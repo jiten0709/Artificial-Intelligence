@@ -4,6 +4,8 @@ This project implements a robust, multi-agent system designed for long-running, 
 
 The system simulates a complete research-to-report workflow, where specialized agents collaborate to produce a comprehensive report on a given topic.
 
+![AI Pipeline Flow](./assets/images/ai-pipeline-flow.png)
+
 ## 🚀 Key Features
 
 - **State Management & Persistence**: The system tracks the state of every task in a `task_states.json` file. This allows the workflow to be paused, inspected, and resumed, even after a crash.
@@ -15,6 +17,8 @@ The system simulates a complete research-to-report workflow, where specialized a
 - **Formatted Output**: Generates a clean, human-readable final report (`research_results.txt`) summarizing the entire workflow.
 
 ## ⚙️ The Workflow
+
+![4-Agent Pipeline](./assets/images/4-agent-pipeline.png)
 
 The system orchestrates a four-step workflow, managed by a central coordinator:
 
@@ -102,5 +106,11 @@ Upon successful execution, the script will generate two files in the same direct
 ---
 
 _This project serves as a practical example of building reliable and observable AI systems._
+
+## 📚 References
+
+- [Cognition AI Blog on Multi-Agent Systems](https://cognition.ai/blog/dont-build-multi-agents)
+
+![Reference Architecture](./assets/images/reference.png)
 
 ## ~ By Jiten 🥰
