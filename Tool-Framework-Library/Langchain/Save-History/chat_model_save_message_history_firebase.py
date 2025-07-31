@@ -27,6 +27,11 @@
 
 """
 
+"""
+firestore: https://console.firebase.google.com/project/langchain-2fa27/firestore/databases/-default-/data/~2Fchat_history~2Flangchain_session
+google cloud: https://console.cloud.google.com/welcome?authuser=0&hl=en-GB&inv=1&invt=Ab4INQ&project=langchain-2fa27
+"""
+
 from dotenv import load_dotenv
 load_dotenv()
 
