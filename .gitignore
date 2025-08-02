@@ -13,6 +13,7 @@ chatbots/RAG_model/venv
 Artificial-Intelligence
 github_openai.example.py
 AI-Agents/Building-Blocks/.env
+Tool-Framework-Library/Langchain/RAG/db
 
 #Ignore vscode AI rules
 .github
