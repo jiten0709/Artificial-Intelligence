@@ -5,6 +5,7 @@ chatbots/.env
 chatbots/RAG_model/.env
 patterns/workflows/1-introduction/.env
 Tool-Framework-Library/Langchain/.env
+Tool-Framework-Library/LangGraph/.env
 
 #Ignore vscode AI rules
 .github
