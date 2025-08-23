@@ -21,3 +21,4 @@ github_openai.example.py
 AI-Agents/Building-Blocks/.env
 Tool-Framework-Library/Langchain/RAG/db
 Tool-Framework-Library/LangGraph/NOTES.md
+*.log

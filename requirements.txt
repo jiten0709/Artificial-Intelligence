@@ -76,7 +76,12 @@ langchain-community==0.3.27
 langchain-core==0.3.72
 langchain-google-firestore==0.5.0
 langchain-google-genai==2.1.8
+langchain-tavily==0.2.11
 langchain-text-splitters==0.3.9
+langgraph==0.6.6
+langgraph-checkpoint==2.1.1
+langgraph-prebuilt==0.6.4
+langgraph-sdk==0.2.3
 langsmith==0.4.8
 markdown-it-py==3.0.0
 marshmallow==3.26.1
@@ -100,6 +105,7 @@ opentelemetry-proto==1.36.0
 opentelemetry-sdk==1.36.0
 opentelemetry-semantic-conventions==0.57b0
 orjson==3.11.1
+ormsgpack==1.10.0
 overrides==7.7.0
 packaging==25.0
 parso==0.8.4
@@ -160,6 +166,7 @@ watchfiles==1.1.0
 wcwidth==0.2.13
 websocket-client==1.8.0
 websockets==15.0.1
+xxhash==3.5.0
 yarl==1.20.1
 zipp==3.23.0
 zstandard==0.23.0
