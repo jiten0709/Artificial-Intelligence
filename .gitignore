@@ -6,6 +6,11 @@ chatbots/RAG_model/.env
 patterns/workflows/1-introduction/.env
 Tool-Framework-Library/Langchain/.env
 
+#Ignore vscode AI rules
+.github
+.venv
+Tool-Framework-Library/Langchain/assets/langchain-2fa27-firebase-adminsdk-fbsvc-83be502fcb.json
+
 # other files & directories
 rough.*
 NLP/.ipynb_checkpoints
@@ -14,8 +19,4 @@ Artificial-Intelligence
 github_openai.example.py
 AI-Agents/Building-Blocks/.env
 Tool-Framework-Library/Langchain/RAG/db
-
-#Ignore vscode AI rules
-.github
-.venv
-Tool-Framework-Library/Langchain/assets/langchain-2fa27-firebase-adminsdk-fbsvc-83be502fcb.json
+Tool-Framework-Library/LangGraph/NOTES.md
