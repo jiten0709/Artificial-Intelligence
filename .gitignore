@@ -13,7 +13,7 @@ Tool-Framework-Library/LangGraph/.env
 Tool-Framework-Library/Langchain/assets/langchain-2fa27-firebase-adminsdk-fbsvc-83be502fcb.json
 
 # other files & directories
-rough.*
+rough
 NLP/.ipynb_checkpoints
 chatbots/RAG_model/venv
 Artificial-Intelligence
