@@ -22,3 +22,4 @@ AI-Agents/Building-Blocks/.env
 Tool-Framework-Library/Langchain/RAG/db
 Tool-Framework-Library/LangGraph/NOTES.md
 *.log
+Tool-Framework-Library/LangGraph/HelloWorld/db
